@@ -234,6 +234,7 @@ name = "audio-capture"
 version = "0.1.0"
 dependencies = [
  "audio-core",
+ "cue-agent",
  "objc2",
  "serde",
  "serde_json",
@@ -241,6 +242,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
+ "transcribe",
 ]
 
 [[package]]

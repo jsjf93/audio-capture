@@ -6,16 +6,14 @@
 //! before this module existed; the three raw NSWindow properties and the
 //! cursor-polling model are documented at their call sites below.
 //!
-//! Until the Tier-1 cue agent exists, a mock generator publishes canned
-//! suggestions on the same `overlay://suggestion` event the real agent
-//! will use — the frontend can't tell the difference, which is the point:
-//! swapping mock for real later means deleting `spawn_mock_suggestions`
-//! and nothing else.
+//! Suggestions arrive as `overlay://suggestion` events, emitted by the
+//! assistant pipeline's forwarder in lib.rs (capture → transcription →
+//! cue agent → here).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 pub const OVERLAY_LABEL: &str = "overlay";
 
@@ -36,8 +34,8 @@ pub struct OverlayState {
     regions: Mutex<Vec<Region>>,
     /// Handle to the current overlay session's liveness flag. Re-opening
     /// the overlay flips the old flag off so the previous session's
-    /// background threads (cursor poller, mock generator) can't outlive it
-    /// and double up against the new window.
+    /// cursor-poller thread can't outlive it and double up against the
+    /// new window.
     session: Mutex<Option<Arc<AtomicBool>>>,
 }
 
@@ -129,8 +127,7 @@ pub fn open_overlay(app: tauri::AppHandle, state: tauri::State<'_, OverlayState>
     apply_native_overlay_behavior(&window);
 
     let session = state.begin_session();
-    spawn_cursor_poller(app.clone(), session.clone());
-    spawn_mock_suggestions(app, session);
+    spawn_cursor_poller(app, session);
     Ok(())
 }
 
@@ -216,85 +213,4 @@ fn spawn_cursor_poller(app: tauri::AppHandle, session: Arc<AtomicBool>) {
             }
         })
         .expect("failed to spawn overlay-cursor-poller thread");
-}
-
-#[derive(Clone, serde::Serialize)]
-struct SuggestionEvent {
-    id: String,
-    /// Which stream the trigger cue came from: "you" (mic) or "them"
-    /// (system output) — the two-stream separation, surfaced in the UI.
-    source: &'static str,
-    cue: &'static str,
-    hint: &'static str,
-    /// Tier-2 guidance. Mock-only shortcut: shipped with the suggestion
-    /// and "streamed" client-side. The real Tier-2 agent will stream this
-    /// on demand after a click instead.
-    detail: &'static str,
-}
-
-/// Stand-in for the Tier-1 cue agent: emits a canned suggestion every few
-/// seconds on the same event the real agent will use. Delete this (and
-/// nothing else) when the agent phase lands.
-fn spawn_mock_suggestions(app: tauri::AppHandle, session: Arc<AtomicBool>) {
-    const POOL: &[(&str, &str, &str, &str)] = &[
-        (
-            "them",
-            "budget approval",
-            "Ask who signs off on this purchase.",
-            "They mentioned budget approval without naming an owner — that's usually a soft stall. Naming the approver now surfaces blockers before they cost you the next two weeks.",
-        ),
-        (
-            "them",
-            "we tried something similar before",
-            "Dig into why the last attempt failed.",
-            "A past failure is your best qualification tool. Ask what specifically didn't work and who felt the pain — then position against that, not a generic competitor.",
-        ),
-        (
-            "you",
-            "let me jump ahead",
-            "Go back — slide 4 raised a question.",
-            "You moved past the pricing slide while they were still reading it. Return to it and ask what caught their eye — unasked questions become objections later.",
-        ),
-        (
-            "them",
-            "timeline",
-            "Anchor a concrete next step.",
-            "Vague timelines stall deals. Propose a specific date for the follow-up and name what each side brings to it.",
-        ),
-        (
-            "you",
-            "pricing depends",
-            "Give the range now — hedging reads as evasive.",
-            "You deflected the pricing question. Buyers anchor on trust before numbers; a wide-but-honest range keeps the conversation open, while \"it depends\" closes it.",
-        ),
-    ];
-
-    std::thread::Builder::new()
-        .name("overlay-mock-suggestions".into())
-        .spawn(move || {
-            // First suggestion arrives quickly so the person verifying
-            // isn't staring at an idle pill wondering if it's broken.
-            std::thread::sleep(Duration::from_millis(2500));
-            let mut i = 0usize;
-            while session.load(Ordering::SeqCst) {
-                if app.get_webview_window(OVERLAY_LABEL).is_none() {
-                    break;
-                }
-                let (source, cue, hint, detail) = POOL[i % POOL.len()];
-                let _ = app.emit_to(
-                    OVERLAY_LABEL,
-                    "overlay://suggestion",
-                    SuggestionEvent {
-                        id: format!("mock-{i}"),
-                        source,
-                        cue,
-                        hint,
-                        detail,
-                    },
-                );
-                i += 1;
-                std::thread::sleep(Duration::from_secs(12));
-            }
-        })
-        .expect("failed to spawn overlay-mock-suggestions thread");
 }

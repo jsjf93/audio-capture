@@ -14,10 +14,24 @@ use tokio::sync::Mutex;
 /// cleanly on an intentional stop rather than left to fight the shutdown.
 struct AppState {
     bus: AudioBus,
+    transcript_bus: transcribe::TranscriptBus,
     mic: Mutex<MicrophoneSource>,
     system: Mutex<SystemOutputSource>,
     mic_supervisor: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     system_supervisor: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    assistant: Mutex<Option<AssistantHandles>>,
+}
+
+/// The three tasks that make up a running assistant session:
+/// transcription (AudioBus → TranscriptBus), the cue agent
+/// (TranscriptBus → SuggestionBus), and the forwarder that turns
+/// suggestions into overlay events. Held so `stop_assistant` can abort
+/// them; each stage's internal worker threads shut down when their
+/// channel senders drop with the aborted task.
+struct AssistantHandles {
+    transcription: tauri::async_runtime::JoinHandle<()>,
+    agent: tauri::async_runtime::JoinHandle<()>,
+    forwarder: tauri::async_runtime::JoinHandle<()>,
 }
 
 /// How long a source can go without publishing a frame before it's
@@ -70,16 +84,173 @@ async fn stop_system_capture(state: tauri::State<'_, AppState>) -> Result<(), St
     system.stop().await.map_err(|e| e.to_string())
 }
 
+/// Starts the full assistant pipeline: transcription of both capture
+/// streams, the Tier-1 cue agent, and forwarding of its suggestions to
+/// the overlay window. Deliberately separate from capture start (same
+/// composability rule as mic/system) — capture without the assistant is a
+/// valid, cheaper mode, and the assistant needs things capture doesn't
+/// (a Whisper model on disk, an API key).
+#[tauri::command]
+async fn start_assistant(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    mode: Option<String>,
+) -> Result<(), String> {
+    let mut assistant = state.assistant.lock().await;
+    if assistant.is_some() {
+        return Ok(());
+    }
+
+    let mode = mode.unwrap_or_else(|| "general".to_string());
+    let profile = cue_agent::mode_profile(&mode).ok_or_else(|| format!("unknown assistant mode `{mode}`"))?;
+    eprintln!("[assistant] starting in `{}` mode", profile.label);
+
+    let model = cue_agent::AnthropicModel::from_env(profile.system_prompt).map_err(|e| {
+        format!("{e} — create one at console.anthropic.com and export ANTHROPIC_API_KEY in the shell you launch the app from")
+    })?;
+    let model_path = resolve_whisper_model_path().ok_or_else(|| {
+        "whisper model not found — run `bash scripts/download-model.sh` first (or set WHISPER_MODEL_PATH)".to_string()
+    })?;
+
+    // Loading the Whisper model takes seconds and hundreds of MB of I/O —
+    // keep it off the async runtime.
+    let transcriber = tauri::async_runtime::spawn_blocking(move || {
+        transcribe::WhisperTranscriber::new(&model_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let transcription = tauri::async_runtime::spawn(transcribe::run_transcription(
+        state.bus.clone(),
+        state.transcript_bus.clone(),
+        Box::new(transcriber),
+        transcribe::ChunkerConfig::default(),
+    ));
+
+    // Console mirror of the transcript, so the terminal running `tauri dev`
+    // shows exactly what the agent is (or isn't) hearing.
+    {
+        let mut rx = state.transcript_bus.subscribe();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(seg) => {
+                        let who = match seg.source {
+                            SourceKind::Microphone => "you",
+                            SourceKind::SystemOutput => "them",
+                        };
+                        eprintln!("[transcript] [{who}] {}", seg.text);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    let suggestion_bus = cue_agent::SuggestionBus::new(32);
+    // Forwarder is spawned before the agent so it's subscribed before the
+    // first suggestion can possibly be published.
+    let forwarder = tauri::async_runtime::spawn(forward_suggestions(app, suggestion_bus.clone()));
+    let agent = tauri::async_runtime::spawn(cue_agent::run_cue_agent(
+        state.transcript_bus.clone(),
+        suggestion_bus,
+        std::sync::Arc::new(model),
+        profile.trigger,
+        profile.min_suggestion_value,
+    ));
+
+    *assistant = Some(AssistantHandles {
+        transcription,
+        agent,
+        forwarder,
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_assistant(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    if let Some(handles) = state.assistant.lock().await.take() {
+        handles.transcription.abort();
+        handles.agent.abort();
+        handles.forwarder.abort();
+    }
+    Ok(())
+}
+
+/// Dev-time model resolution: the env override, then the repo's models/
+/// directory from either the workspace root or src-tauri (tauri dev's
+/// cwd). Bundling a model into the .app is a packaging task for later.
+fn resolve_whisper_model_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("WHISPER_MODEL_PATH") {
+        let p = std::path::PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    ["models/ggml-base.en.bin", "../models/ggml-base.en.bin"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+}
+
+/// The payload shape the overlay expects (see src/overlay/useSuggestions.ts);
+/// `SourceKind` is mapped to the UI's "you"/"them" vocabulary here, at the
+/// IPC boundary, so the crates below stay in domain terms.
+#[derive(Clone, serde::Serialize)]
+struct OverlaySuggestionEvent {
+    id: String,
+    source: &'static str,
+    cue: String,
+    hint: String,
+    detail: String,
+}
+
+async fn forward_suggestions(app: tauri::AppHandle, bus: cue_agent::SuggestionBus) {
+    let mut rx = bus.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(s) => {
+                let source = match s.source {
+                    SourceKind::Microphone => "you",
+                    SourceKind::SystemOutput => "them",
+                };
+                if let Err(e) = app.emit_to(
+                    overlay::OVERLAY_LABEL,
+                    "overlay://suggestion",
+                    OverlaySuggestionEvent {
+                        id: s.id,
+                        source,
+                        cue: s.cue,
+                        hint: s.hint,
+                        detail: s.detail,
+                    },
+                ) {
+                    eprintln!(
+                        "[assistant] could not deliver suggestion to overlay \
+                         (is the overlay window open?): {e}"
+                    );
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             bus: AudioBus::new(64),
+            transcript_bus: transcribe::TranscriptBus::new(64),
             mic: Mutex::new(MicrophoneSource::new()),
             system: Mutex::new(SystemOutputSource::new()),
             mic_supervisor: Mutex::new(None),
             system_supervisor: Mutex::new(None),
+            assistant: Mutex::new(None),
         })
         .manage(overlay::OverlayState::default())
         .setup(|app| {
@@ -117,6 +288,8 @@ pub fn run() {
             stop_mic_capture,
             start_system_capture,
             stop_system_capture,
+            start_assistant,
+            stop_assistant,
             overlay::open_overlay,
             overlay::close_overlay,
             overlay::set_overlay_interactive_regions,

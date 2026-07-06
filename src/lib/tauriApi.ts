@@ -21,6 +21,20 @@ export async function openOverlay(): Promise<void> {
   await invoke("open_overlay");
 }
 
+// Starts/stops the assistant pipeline (transcription + cue agent +
+// suggestion forwarding). Requires capture to be running to hear anything,
+// a Whisper model on disk, and ANTHROPIC_API_KEY in the environment.
+// Modes are defined in crates/cue-agent/src/modes.rs.
+export type AssistantMode = "sales" | "meeting" | "general";
+
+export async function startAssistant(mode: AssistantMode): Promise<void> {
+  await invoke("start_assistant", { mode });
+}
+
+export async function stopAssistant(): Promise<void> {
+  await invoke("stop_assistant");
+}
+
 export async function stopSystemCapture(): Promise<void> {
   await invoke("stop_system_capture");
 }

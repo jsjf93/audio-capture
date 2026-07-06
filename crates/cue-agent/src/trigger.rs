@@ -24,17 +24,47 @@ pub struct TriggerConfig {
 
 impl Default for TriggerConfig {
     fn default() -> Self {
+        // Mirrors the "general" mode profile; modes.rs is where per-mode
+        // tuning actually lives.
         Self {
             cooldown: Duration::from_secs(8),
             min_new_words: 6,
-            context_char_budget: 4_000,
+            context_char_budget: 12_000,
         }
     }
 }
 
+/// How far back to look when checking whether a new segment is a speaker
+/// echo of the other stream (see `push`).
+const ECHO_WINDOW: Duration = Duration::from_secs(10);
+
 struct Entry {
     source: SourceKind,
     text: String,
+    at: Instant,
+    words: std::collections::HashSet<String>,
+}
+
+fn normalized_words(text: &str) -> std::collections::HashSet<String> {
+    text.split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Word-set Jaccard similarity — crude but robust against the small
+/// wording differences two STT passes produce over the same audio
+/// ("it's Micah over at" vs "it's uh, Micah, um, over at").
+fn is_echo_of(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let intersection = a.intersection(b).count();
+    let union = a.len() + b.len() - intersection;
+    intersection as f32 / union as f32 > 0.55
 }
 
 /// The rolling conversation context plus the trigger bookkeeping.
@@ -58,11 +88,34 @@ impl RollingTranscript {
     }
 
     pub fn push(&mut self, source: SourceKind, text: &str) {
+        let words = normalized_words(text);
+
+        // Speaker-echo guard, discovered necessary in real-world testing:
+        // when call audio plays through a speaker the mic can hear (any
+        // input/output device mismatch defeats hardware echo cancellation),
+        // the same sentence arrives on *both* streams a moment apart, and
+        // the doubled transcript reads as two people talking over each
+        // other — which reliably confuses the model into passing. A
+        // near-duplicate of a recent segment from the *other* stream is
+        // dropped; the first arrival keeps the attribution.
+        let now = Instant::now();
+        let is_echo = self
+            .entries
+            .iter()
+            .rev()
+            .take_while(|e| now.duration_since(e.at) < ECHO_WINDOW)
+            .any(|e| e.source != source && is_echo_of(&words, &e.words));
+        if is_echo {
+            return;
+        }
+
         self.words_since_fire += text.split_whitespace().count();
         self.total_chars += text.len();
         self.entries.push_back(Entry {
             source,
             text: text.to_string(),
+            at: now,
+            words,
         });
         while self.total_chars > self.config.context_char_budget && self.entries.len() > 1 {
             if let Some(dropped) = self.entries.pop_front() {
@@ -155,6 +208,51 @@ mod tests {
         let rendered = t.render();
         assert!(!rendered.contains('a'), "oldest entry should have been dropped");
         assert!(rendered.contains('b'));
+    }
+
+    #[test]
+    fn near_duplicate_from_the_other_stream_is_dropped_as_echo() {
+        let mut t = RollingTranscript::new(config());
+        t.push(SourceKind::SystemOutput, "yeah hey Edward it's Micah over at NOPL");
+        // The mic hears the speaker a moment later, slightly differently.
+        t.push(SourceKind::Microphone, "yeah Edward it's uh Micah um over at NOPL");
+        let rendered = t.render();
+        assert_eq!(
+            rendered.matches("Micah").count(),
+            1,
+            "echoed line should appear once, got:\n{rendered}"
+        );
+        assert!(rendered.contains("[them]"), "first arrival keeps attribution");
+    }
+
+    #[test]
+    fn echoes_do_not_count_toward_the_word_gate() {
+        let mut t = RollingTranscript::new(config());
+        t.push(SourceKind::SystemOutput, "could you send me a quick email");
+        t.mark_fired();
+        std::thread::sleep(Duration::from_millis(60));
+        t.push(SourceKind::Microphone, "could you send me a quick email");
+        assert!(
+            !t.should_fire(),
+            "an echo alone must not re-trigger a model call"
+        );
+    }
+
+    #[test]
+    fn same_words_from_the_same_stream_are_kept() {
+        let mut t = RollingTranscript::new(config());
+        t.push(SourceKind::SystemOutput, "no no no wait a moment");
+        t.push(SourceKind::SystemOutput, "no no no wait a moment");
+        assert_eq!(t.render().matches("wait a moment").count(), 2);
+    }
+
+    #[test]
+    fn different_content_from_the_other_stream_is_kept() {
+        let mut t = RollingTranscript::new(config());
+        t.push(SourceKind::SystemOutput, "could you send me a quick email instead");
+        t.push(SourceKind::Microphone, "sure no problem I will do that right away");
+        let rendered = t.render();
+        assert!(rendered.contains("[them]") && rendered.contains("[you]"));
     }
 
     #[test]

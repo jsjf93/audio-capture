@@ -39,6 +39,8 @@ function App() {
   const health = useCaptureHealth();
   const [micCommandStatus, setMicCommandStatus] = useState<CommandStatus>("idle");
   const [systemCommandStatus, setSystemCommandStatus] = useState<CommandStatus>("idle");
+  const [assistantOn, setAssistantOn] = useState(false);
+  const [assistantMode, setAssistantMode] = useState<tauriApi.AssistantMode>("sales");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -99,7 +101,41 @@ function App() {
       <p>
         <button onClick={() => tauriApi.openOverlay().catch((e) => setError(String(e)))}>
           Open overlay
+        </button>{" "}
+        <select
+          value={assistantMode}
+          disabled={assistantOn || busy}
+          onChange={(e) => setAssistantMode(e.target.value as tauriApi.AssistantMode)}
+        >
+          <option value="sales">Sales assistant</option>
+          <option value="meeting">Meeting assistant</option>
+          <option value="general">General assistant</option>
+        </select>{" "}
+        <button
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              if (assistantOn) {
+                await tauriApi.stopAssistant();
+                setAssistantOn(false);
+              } else {
+                await tauriApi.startAssistant(assistantMode);
+                setAssistantOn(true);
+              }
+            } catch (e) {
+              setError(String(e));
+            }
+            setBusy(false);
+          }}
+        >
+          {assistantOn ? "Stop assistant" : "Start assistant"}
         </button>
+      </p>
+      <p style={{ fontSize: "0.85em", opacity: 0.7 }}>
+        The assistant transcribes both streams and suggests cues in the overlay. Start
+        capture first so it has audio to listen to.
       </p>
     </main>
   );

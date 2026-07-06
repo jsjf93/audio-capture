@@ -3,62 +3,41 @@
 //! latency dominate the choice.
 //!
 //! Two API features carry the design:
-//! - **Tool use as structured output.** The model is given exactly one
-//!   tool, `propose_suggestion(cue, hint, detail)`, and told that *not*
-//!   calling it is the normal outcome. Parsing a typed tool call is far
-//!   more reliable than asking for JSON in prose, and "no tool call"
+//! - **Tool use as structured output.** The model gets two tools:
+//!   `propose_suggestion(cue, hint, detail)` and `update_notes(notes)`,
+//!   and may call both, either, or neither. Parsing typed tool calls is
+//!   far more reliable than asking for JSON in prose, and "no tool call"
 //!   is an unambiguous, well-typed "nothing worth saying".
-//! - **Prompt caching.** The system prompt is marked cacheable; only the
-//!   rolling transcript changes between calls, so repeat calls within the
-//!   cache TTL bill the instructions at the cached rate.
+//! - **Prompt caching.** The system prompt (per mode, see modes.rs) is
+//!   marked cacheable; only the notes + rolling transcript change between
+//!   calls, so repeat calls within the cache TTL bill the instructions at
+//!   the cached rate.
 
-use crate::{AgentError, ModelSuggestion, SuggestionModel};
+use crate::{AgentError, ModelOutcome, ModelSuggestion, SuggestionModel};
 use serde_json::{json, Value};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 const MODEL: &str = "claude-haiku-4-5-20251001";
-const MAX_TOKENS: u32 = 400;
-
-const SYSTEM_PROMPT: &str = "\
-You are a silent assistant watching a live work conversation (a sales call, \
-interview, or meeting) through a rolling transcript. Lines tagged [you] are \
-the user you are helping; lines tagged [them] are everyone else. The \
-transcript comes from live speech recognition, so expect missing \
-punctuation and occasional mis-heard words.
-
-Each time you are shown the transcript, decide whether there is ONE \
-suggestion valuable enough to interrupt the user's glance for. The bar is \
-high: an unasked question that matters, a buying signal or objection worth \
-acting on now, something the user deflected that will come back, a concrete \
-next step going unanchored. If the moment is ordinary — greetings, \
-logistics, the user already doing the right thing — do NOT call the tool; \
-reply with the single word: pass.
-
-When you do suggest, call propose_suggestion exactly once:
-- cue: a short fragment quoted or near-quoted from the transcript that \
-triggered you (a few words).
-- hint: one imperative sentence, at most 12 words. It must be readable in \
-one second.
-- detail: 2-4 sentences of deeper guidance for if the user clicks to \
-expand: why this matters now and how to act on it.
-
-Never repeat or rephrase a suggestion listed as already shown.";
+const MAX_TOKENS: u32 = 700;
 
 pub struct AnthropicModel {
     client: reqwest::Client,
     api_key: String,
+    /// The mode's composed system prompt (see `modes::mode_profile`).
+    system_prompt: String,
 }
 
 impl AnthropicModel {
     /// Reads `ANTHROPIC_API_KEY` from the environment. Dev-time
     /// arrangement — the key moves to the macOS Keychain when settings
     /// exist.
-    pub fn from_env() -> Result<Self, AgentError> {
+    pub fn from_env(system_prompt: String) -> Result<Self, AgentError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| AgentError::MissingApiKey)?;
         Ok(Self {
             client: reqwest::Client::new(),
             api_key,
+            system_prompt,
         })
     }
 }
@@ -68,8 +47,9 @@ impl SuggestionModel for AnthropicModel {
     async fn suggest(
         &self,
         transcript: &str,
+        notes: &str,
         recent_hints: &[String],
-    ) -> Result<Option<ModelSuggestion>, AgentError> {
+    ) -> Result<ModelOutcome, AgentError> {
         let already_shown = if recent_hints.is_empty() {
             "none yet".to_string()
         } else {
@@ -79,32 +59,49 @@ impl SuggestionModel for AnthropicModel {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
+        let notes = if notes.is_empty() { "(none yet)" } else { notes };
 
         let body = json!({
             "model": MODEL,
             "max_tokens": MAX_TOKENS,
             "system": [{
                 "type": "text",
-                "text": SYSTEM_PROMPT,
+                "text": self.system_prompt,
                 "cache_control": { "type": "ephemeral" }
             }],
-            "tools": [{
-                "name": "propose_suggestion",
-                "description": "Propose the one suggestion worth showing the user right now. Only call this when the bar described in your instructions is met.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "cue": { "type": "string", "description": "Short transcript fragment that triggered this" },
-                        "hint": { "type": "string", "description": "One imperative sentence, max 12 words" },
-                        "detail": { "type": "string", "description": "2-4 sentences of expanded guidance" }
-                    },
-                    "required": ["cue", "hint", "detail"]
+            "tools": [
+                {
+                    "name": "propose_suggestion",
+                    "description": "Propose the one suggestion worth showing the user right now. Only call this when the bar described in your instructions is met.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "value": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Honest 1-10 score of how much showing this right now helps the user" },
+                            "cue": { "type": "string", "description": "Short transcript fragment that triggered this" },
+                            "hint": { "type": "string", "description": "One imperative sentence, max 12 words" },
+                            "detail": { "type": "string", "description": "2-4 sentences of expanded guidance" }
+                        },
+                        "required": ["value", "cue", "hint", "detail"]
+                    }
+                },
+                {
+                    "name": "update_notes",
+                    "description": "Replace your running notes about this conversation. Call whenever this exchange taught you something durable; send the complete replacement text.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "notes": { "type": "string", "description": "Complete replacement notes, max ~150 words, tight and factual" }
+                        },
+                        "required": ["notes"]
+                    }
                 }
-            }],
+            ],
             "messages": [{
                 "role": "user",
                 "content": format!(
-                    "Suggestions already shown (do not repeat):\n{already_shown}\n\nTranscript so far:\n{transcript}"
+                    "Suggestions already shown (do not repeat):\n{already_shown}\n\n\
+                     Your running notes from earlier in this conversation:\n{notes}\n\n\
+                     Transcript (the recent part of the conversation):\n{transcript}"
                 )
             }]
         });
@@ -133,29 +130,45 @@ impl SuggestionModel for AnthropicModel {
             return Err(AgentError::Api(format!("{status}: {message}")));
         }
 
-        // Find the tool call, if any. Plain text (the "pass" path) means
-        // no suggestion — by design, not an error.
+        // Collect whichever tool calls arrived; plain text (the "pass"
+        // path) yields the default empty outcome — by design, not an error.
         let Some(blocks) = payload["content"].as_array() else {
             return Err(AgentError::MalformedResponse(
                 "response has no content array".into(),
             ));
         };
+        let mut outcome = ModelOutcome::default();
         for block in blocks {
-            if block["type"] == "tool_use" && block["name"] == "propose_suggestion" {
-                let input = &block["input"];
-                let field = |name: &str| -> Result<String, AgentError> {
-                    input[name]
-                        .as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| AgentError::MalformedResponse(format!("tool input missing `{name}`")))
-                };
-                return Ok(Some(ModelSuggestion {
-                    cue: field("cue")?,
-                    hint: field("hint")?,
-                    detail: field("detail")?,
-                }));
+            if block["type"] != "tool_use" {
+                continue;
+            }
+            let input = &block["input"];
+            let field = |name: &str| -> Result<String, AgentError> {
+                input[name]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        AgentError::MalformedResponse(format!("tool input missing `{name}`"))
+                    })
+            };
+            match block["name"].as_str() {
+                Some("propose_suggestion") => {
+                    let value = input["value"].as_u64().ok_or_else(|| {
+                        AgentError::MalformedResponse("tool input missing `value`".into())
+                    })?;
+                    outcome.suggestion = Some(ModelSuggestion {
+                        cue: field("cue")?,
+                        hint: field("hint")?,
+                        detail: field("detail")?,
+                        value: value.clamp(1, 10) as u8,
+                    });
+                }
+                Some("update_notes") => {
+                    outcome.updated_notes = Some(field("notes")?);
+                }
+                _ => {}
             }
         }
-        Ok(None)
+        Ok(outcome)
     }
 }
