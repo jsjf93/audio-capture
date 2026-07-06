@@ -32,3 +32,6 @@ src-tauri/binaries/
 
 # Rust build output (workspace root and src-tauri)
 /target/
+
+# Whisper models (downloaded by scripts/download-model.sh; hundreds of MB)
+/models/

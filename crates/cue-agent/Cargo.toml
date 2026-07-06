@@ -1,0 +1,21 @@
+[package]
+name = "cue-agent"
+version = "0.1.0"
+edition.workspace = true
+description = "Tier-1 cue agent: watches the TranscriptBus and proposes timely suggestions via the Anthropic API. Tauri-free by design, like audio-core and transcribe."
+
+[dependencies]
+async-trait = "0.1"
+audio-core = { path = "../audio-core" }
+# rustls instead of the platform OpenSSL: keeps the build self-contained
+# (no system library headers to find — a lesson the whisper.cpp build
+# taught us about this machine).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.52", features = ["sync", "time"] }
+transcribe = { path = "../transcribe" }
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"] }

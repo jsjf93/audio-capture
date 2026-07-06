@@ -1,0 +1,24 @@
+[package]
+name = "transcribe"
+version = "0.1.0"
+edition.workspace = true
+description = "Speech-to-text stage: VAD chunking + local Whisper transcription of AudioBus frames. Tauri-free by design, like audio-core."
+
+[dependencies]
+audio-core = { path = "../audio-core" }
+tokio = { version = "1.52", features = ["sync"] }
+# Pinned to the 0.16 line: 3.0 rewrote the API around audioadapter buffers;
+# 0.16's simple `FftFixedIn` is all we need for whole-chunk conversion.
+rubato = "0.16"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+# `metal` runs inference on the GPU via Apple's Metal API — a large speedup
+# on Apple Silicon. `log_backend` lets us capture whisper.cpp's chatty
+# C-level logging instead of it spraying the console (see whisper.rs).
+# Building whisper.cpp from source here requires `cmake` (brew install
+# cmake). Windows will want a different feature set later.
+whisper-rs = { version = "0.16", features = ["metal", "log_backend"] }
+
+[dev-dependencies]
+hound = "3.5"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }

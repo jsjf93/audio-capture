@@ -6,15 +6,15 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 // to render. Dynamic imports keep each window's CSS out of the other —
 // that matters for the overlay, whose html/body must stay transparent and
 // must not inherit the main window's opaque background.
-const isOverlaySpike = getCurrentWindow().label === "overlay-spike";
+const isOverlay = getCurrentWindow().label === "overlay";
 
 async function mount() {
   const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
-  if (isOverlaySpike) {
-    const { OverlaySpike } = await import("./spike/OverlaySpike");
+  if (isOverlay) {
+    const { OverlayApp } = await import("./overlay/OverlayApp");
     root.render(
       <React.StrictMode>
-        <OverlaySpike />
+        <OverlayApp />
       </React.StrictMode>,
     );
   } else {

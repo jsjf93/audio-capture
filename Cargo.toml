@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/audio-core"]
+members = ["src-tauri", "crates/audio-core", "crates/cue-agent", "crates/transcribe"]
 
 # Keeping compiler settings here means both the Tauri app and audio-core
 # (which is meant to be usable and testable without Tauri at all) build

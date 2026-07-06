@@ -9,9 +9,11 @@ A macOS-first desktop app (Tauri + Rust + React/TS) that captures the microphone
 ## Commands
 
 ### Rust (workspace root)
-- `cargo build --workspace` / `cargo test --workspace` — build/test both `crates/audio-core` and `src-tauri`.
+- `cargo build --workspace` / `cargo test --workspace` — build/test `crates/audio-core`, `crates/transcribe`, and `src-tauri`.
 - `cargo test -p audio-core <test_name>` — run a single test by name (substring match).
 - `cargo run -p audio-core --example <name> -- <args>` — manual verification tools (see Examples below). These need real mic/audio-capture permissions and cannot run in CI.
+- `bash scripts/download-model.sh [tiny.en|base.en|small.en]` — fetch a ggml Whisper model into `models/` (gitignored). Required before running any transcription example; default is `base.en`.
+- **Broken-CLT workaround (this machine, July 2026):** the Command Line Tools install is missing its toolchain libc++ headers, so any C++ compile (`whisper-rs-sys` building whisper.cpp) fails with `'mutex' file not found` after a `cargo clean`. Prefix builds with `CXXFLAGS="-isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"` until the CLT is reinstalled (`sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install`), after which this note should be deleted. Cached builds don't need it.
 
 ### Swift helper (`swift-helper/`)
 - `swift build` (debug) / `swift build -c release` — builds `AudioTapHelper`. Requires macOS 14.4+.
@@ -28,6 +30,7 @@ A macOS-first desktop app (Tauri + Rust + React/TS) that captures the microphone
 
 ### Crate/package boundaries (this is the load-bearing design decision)
 - **`crates/audio-core`** — pure Rust, zero Tauri dependency by design. Owns all capture logic: sources, the event bus, the wire protocol, health/supervision primitives. Must remain buildable and testable standalone (`cargo test -p audio-core` needs no Tauri, no bundling, and — except for a couple of hardware-dependent tests that self-skip — no real hardware).
+- **`crates/transcribe`** — pure Rust, zero Tauri dependency, same discipline as audio-core. The transcription stage: consumes bus frames as just another subscriber (capture code has no idea it exists), chunks them with an energy-based VAD (`chunker.rs` — deliberately simple, isolated so a trained VAD can replace it), resamples to Whisper's 16 kHz (`resample.rs`; rubato pinned to 0.16 — 3.0 rewrote the API), and runs local whisper.cpp inference (`whisper.rs`, via whisper-rs with Metal). The `Transcriber` trait is the seam where a cloud STT impl slots in later. `TranscriptSegment` carries the same `SourceKind` tag as the audio it came from — the you-vs-everyone-else separation must survive every pipeline stage.
 - **`src-tauri`** — the only thing that knows about Tauri. Owns IPC (commands/events), app state, and the supervision *policy* (audio-core provides the detection primitives; src-tauri decides what to do about it and owns the concrete source instances to restart).
 - **`swift-helper`** — an independent Swift package (not a Cargo member), built separately and invoked as a subprocess. This isolation is deliberate: the Core Audio Process Tap API it uses is fragile and easy to get subtly wrong (see `docs/audio-tap-protocol.md`), so a crash or hang there can't take down the whole app.
 
@@ -48,6 +51,9 @@ Defines the exact binary framing the Swift helper writes to stdout and Rust (`sy
 ### Tauri IPC boundary
 Raw audio frames never cross into the webview. The frontend only ever sees small, throttled, derived events: `capture://level` (per-source RMS, ~10Hz) and `capture://health` (state transitions only, not polled). Control flows the other way via commands (`start_mic_capture`, `stop_mic_capture`, `start_system_capture`, `stop_system_capture`) — there is deliberately no single combined "start everything" command on the Rust side; the frontend (`src/App.tsx`) composes the two calls, so each source's status can be tracked and shown independently.
 
+### The suggestion overlay (`src-tauri/src/overlay.rs` + `src/overlay/`)
+A second Tauri window (label `overlay`): transparent, undecorated, always-on-top including over other apps' fullscreen Spaces (`fullScreenAuxiliary` + window level 25 via raw objc2 `msg_send`, main thread only), and hidden from screen capture by default (`sharingType = none`, runtime-toggleable — the DEMO pill). Requires `macOSPrivateApi: true` + the `macos-private-api` tauri cargo feature for true transparency. Per-region click-through works by polling the global cursor from a Rust thread against frontend-reported `[data-interactive]` rects and flipping `ignoresMouseEvents` — the webview can't do this itself because an ignoring window receives no mouse events at all. `data-tauri-drag-region` needs the `core:window:allow-start-dragging` capability permission or it silently no-ops. Suggestions arrive as `overlay://suggestion` events; today they come from a mock generator in overlay.rs (delete `spawn_mock_suggestions` when the real Tier-1 cue agent lands — the event contract is the seam, the frontend doesn't change). Design source of truth: `docs/overlay-design-brief.md` plus the motion/accent rules commented in `src/overlay/overlay.css`.
+
 ### Sidecar bundling gotcha
 Tauri's `externalBin` mechanism expects source files on disk named `<name>-<target-triple>` but **strips the triple suffix** when copying into the bundled `.app`'s `Contents/MacOS/` — the running app looks for a plain `audio-tap-helper` next to its own executable in a release build (see `resolve_bundled_helper_path` in `src-tauri/src/lib.rs`), not the suffixed name. For a universal build, `tauri build --target universal-apple-darwin` does *not* lipo the sidecar itself — you must provide a pre-merged `audio-tap-helper-universal-apple-darwin` (which is what `scripts/build-helper.sh` does automatically when both arch-specific builds succeed).
 
@@ -57,3 +63,8 @@ These aren't demos — they're the project's manual/integration verification sto
 - `dual_capture.rs` — the core proof: captures both streams simultaneously to separate WAV files, for confirming zero bleed between them.
 - `decode_tap_capture.rs` / `inspect_wav.rs` — decode a raw helper capture or inspect any WAV's per-second RMS, to eyeball whether a capture is real audio vs. silence/garbage.
 - `mic_only_long_run.rs` — isolates whether a mic issue is mic-specific or an interaction with concurrent system-audio capture.
+
+And in `crates/transcribe/examples/` (both need a model — run `scripts/download-model.sh` first):
+- `mic_transcribe.rs` — live mic → VAD → Whisper → console, printing per-chunk latency. The transcription phase's manual milestone check.
+- `transcribe_wav.rs` — offline transcription of any WAV; hardware-free verification (pairs well with `say -o test.wav --data-format=LEF32@22050 "known text"`) and the seed of the future record-and-replay evaluation harness.
+- `dual_transcribe.rs` — both streams transcribed live via `run_transcription` + `TranscriptBus`, printed as tagged `[you]`/`[them]` lines. The text-level equivalent of `dual_capture`'s no-bleed proof (also needs the Swift helper built).

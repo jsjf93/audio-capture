@@ -96,10 +96,9 @@ function App() {
 
       {error && <p className="error-text">Error: {error}</p>}
 
-      {/* THROWAWAY SPIKE launcher — remove with src-tauri/src/overlay_spike.rs */}
       <p>
-        <button onClick={() => tauriApi.openOverlaySpike().catch((e) => setError(String(e)))}>
-          Open overlay spike
+        <button onClick={() => tauriApi.openOverlay().catch((e) => setError(String(e)))}>
+          Open overlay
         </button>
       </p>
     </main>

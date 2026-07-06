@@ -1,0 +1,372 @@
+/* Suggestion overlay styles, from the design board "Quiet backup, not a
+   second participant". Two disciplines worth preserving when editing:
+
+   1. The single warm-amber accent is reserved for exactly four things —
+      the newest cue, "them"-sourced fragments, hover/interactive edges,
+      and streaming text. Nothing else gets it, so it stays meaningful.
+      Red/green/amber *status* colors appear only on the audio-health dots.
+   2. Anything not painted is literally not there: the window is
+      transparent and clicks in unpainted areas pass through to the app
+      beneath. Cards must be fully self-contained (own background, own
+      contrast) because the backdrop is arbitrary and can't be blurred. */
+
+html,
+body,
+#root {
+  background: transparent !important;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+:root {
+  --amber: #e0a458;
+  /* Lighter and more opaque than the mockups' surface: over a real dark
+     video grid the original rgba(23,23,29,0.93) melted into the
+     background. The backdrop can't be blurred (transparent window, no
+     access to what's behind), so the card must carry all of its own
+     separation. */
+  --card-bg: rgba(32, 32, 40, 0.97);
+  --card-border: rgba(255, 255, 255, 0.16);
+  /* Dual-ring elevation: an inner top highlight + a dark outer ring, so
+     cards read as distinct objects over dark *and* light backdrops. */
+  --card-elevation:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 8px 28px rgba(0, 0, 0, 0.55);
+  --text: #ececf1;
+  --text-dim: #9a9aa4;
+  --red: #e5484d;
+  --green: #39c26d;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.overlay-root {
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  height: 100vh;
+  box-sizing: border-box;
+  user-select: none;
+  cursor: default;
+}
+
+/* ---- handle pill + demo pill -------------------------------------- */
+
+.top-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.handle-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  box-shadow: var(--card-elevation);
+}
+
+.grip {
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: grab;
+  letter-spacing: 1px;
+}
+
+.pill-divider {
+  width: 1px;
+  height: 14px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot-green {
+  background: var(--green);
+}
+
+.dot-amber {
+  background: var(--amber);
+}
+
+.dot-red {
+  background: var(--red);
+}
+
+.dot-idle {
+  background: transparent;
+  border: 1.5px solid var(--text-dim);
+  box-sizing: border-box;
+}
+
+.pill-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.pill-btn:hover {
+  color: var(--text);
+}
+
+/* The one state that must be loud (design state 05). */
+.demo-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: #f2777b;
+  background: rgba(229, 72, 77, 0.14);
+  border: 1px solid rgba(229, 72, 77, 0.55);
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.demo-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--red);
+}
+
+/* Sits directly on the desktop (no card behind it), so it needs its own
+   tiny surface to stay readable over arbitrary backgrounds. */
+.earlier-note {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  align-self: flex-end;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  box-shadow: var(--card-elevation);
+}
+
+/* ---- suggestion cards ---------------------------------------------- */
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: var(--card-elevation);
+  cursor: pointer;
+  /* hover = 120ms border/shadow: this transition *is* the visual for the
+     pass-through→clickable boundary (Rust flips ignoresMouseEvents at the
+     same moment the cursor crosses the card edge). */
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    opacity 220ms ease,
+    transform 220ms ease;
+  /* entrance 180ms (never scale from 0) + age-out over the card lifetime
+     (must match CARD_LIFETIME_MS in useSuggestions.ts). */
+  animation:
+    card-in 180ms ease-out,
+    card-age 18s linear forwards;
+}
+
+.card:hover {
+  border-color: var(--amber);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 10px 32px rgba(0, 0, 0, 0.6);
+}
+
+/* Expanded cards are pinned: aging pauses while the user reads. */
+.card.is-expanded {
+  animation-play-state: running, paused;
+  opacity: 1;
+}
+
+.card.is-receded {
+  opacity: 0.55; /* floor raised from the mockups' 0.45: real dark backdrops swallow it */
+  transform: scale(0.97);
+}
+
+.card.is-leaving {
+  animation: card-out 150ms ease-in forwards;
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes card-age {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0.55; /* floor raised from the mockups' 0.4, same reason as .is-receded */
+    transform: scale(0.92);
+  }
+}
+
+@keyframes card-out {
+  to {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+}
+
+.card-cue-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+}
+
+.cue-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* them = filled amber, you = hollow — the two-stream separation, visible. */
+.source-them .cue-dot {
+  background: var(--amber);
+}
+
+.source-you .cue-dot {
+  background: transparent;
+  border: 1.5px solid var(--text-dim);
+  box-sizing: border-box;
+}
+
+.cue-text {
+  font-family: var(--mono);
+  font-size: 11px;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-them .cue-text {
+  color: var(--amber);
+}
+
+.source-you .cue-text {
+  color: var(--text-dim);
+}
+
+.card-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chevron {
+  color: var(--text-dim);
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.card:hover .chevron {
+  opacity: 1;
+  color: var(--amber);
+}
+
+.card-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.card:hover .card-dismiss {
+  opacity: 1;
+}
+
+.card-dismiss:hover {
+  color: var(--text);
+}
+
+.card-hint {
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+/* expand = 220ms height/opacity via the grid-rows trick (a transitionable
+   substitute for height:auto). */
+.card-detail-clip {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms ease-in-out;
+}
+
+.card.is-expanded .card-detail-clip {
+  grid-template-rows: 1fr;
+}
+
+.card-detail {
+  overflow: hidden;
+  min-height: 0;
+  color: #c9c9d2;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.card.is-expanded .card-detail {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.detail-generating {
+  color: var(--text-dim);
+}
+
+/* Streaming: trailing block cursor, no spinner (design motion spec). */
+.stream-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  background: var(--amber);
+}
