@@ -143,7 +143,7 @@ mod tests {
         t.push(SourceKind::SystemOutput, "we need budget approval before we can start");
         t.mark_fired();
         std::thread::sleep(Duration::from_millis(60));
-        t.push(SourceKind::MicrophoneSource_PLACEHOLDER, "ok");
+        t.push(SourceKind::Microphone, "ok");
         assert!(!t.should_fire(), "two words since firing is not enough");
     }
 
