@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>This app captures your microphone so it can keep your voice separate from everyone else's audio in a meeting.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>This app captures system audio output (e.g. what plays through your speakers) so it can keep it separate from your microphone input.</string>
+</dict>
+</plist>
