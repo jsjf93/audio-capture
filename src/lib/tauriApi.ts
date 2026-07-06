@@ -16,6 +16,12 @@ export async function startSystemCapture(): Promise<void> {
   await invoke("start_system_capture");
 }
 
+// THROWAWAY SPIKE — opens the overlay experiment window (see
+// src-tauri/src/overlay_spike.rs). Remove alongside that module.
+export async function openOverlaySpike(): Promise<void> {
+  await invoke("open_overlay_spike");
+}
+
 export async function stopSystemCapture(): Promise<void> {
   await invoke("stop_system_capture");
 }

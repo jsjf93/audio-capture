@@ -234,6 +234,7 @@ name = "audio-capture"
 version = "0.1.0"
 dependencies = [
  "audio-core",
+ "objc2",
  "serde",
  "serde_json",
  "tauri",

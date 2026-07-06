@@ -1,3 +1,5 @@
+mod overlay_spike;
+
 use audio_core::{
     AudioBus, AudioSource, HealthState, MicrophoneSource, RestartPolicy, SourceKind,
     StalenessWatcher, SystemOutputSource,
@@ -79,6 +81,7 @@ pub fn run() {
             mic_supervisor: Mutex::new(None),
             system_supervisor: Mutex::new(None),
         })
+        .manage(overlay_spike::SpikeState::default())
         .setup(|app| {
             // `audio-core` deliberately has no Tauri dependency, so it can't
             // resolve the bundled sidecar path itself — it only knows how
@@ -113,7 +116,11 @@ pub fn run() {
             start_mic_capture,
             stop_mic_capture,
             start_system_capture,
-            stop_system_capture
+            stop_system_capture,
+            overlay_spike::open_overlay_spike,
+            overlay_spike::close_overlay_spike,
+            overlay_spike::set_overlay_interactive_regions,
+            overlay_spike::set_overlay_capture_visibility
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
