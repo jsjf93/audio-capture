@@ -2,7 +2,7 @@
 
 A local macOS desktop app that captures your microphone and your computer's system audio output as two separate, simultaneous, real-time streams — and keeps them separate all the way through the pipeline. Because the app runs locally, it always knows which stream is "you" (the microphone) and which is "everyone else" (system output, e.g. the other participants in a video call) — a cheap, reliable substitute for speaker diarization.
 
-This is the capture foundation for a larger meeting/interview assistant (live transcription, summaries, contextual prompts, etc.), all of which is future work built on top of this pipeline rather than part of it yet.
+On top of that capture foundation, the app now includes a first cut of the meeting/interview assistant itself: live transcription of both streams, and a "cue agent" that watches the conversation and surfaces short, contextual suggestions in an always-on-top overlay. Summaries and other higher-level features are still future work.
 
 ## How it works, briefly
 
@@ -10,6 +10,7 @@ This is the capture foundation for a larger meeting/interview assistant (live tr
 - Both sources publish onto a shared internal event bus, tagged by source — samples from the two are never merged.
 - A minimal React/TypeScript UI shows a live level meter and status indicator for each stream, and start/stop controls.
 - A supervisor watches both streams for signs of trouble (a crashed helper, a silently stalled capture) and restarts automatically.
+- Optionally, starting the **assistant** (`crates/transcribe` + `crates/cue-agent`) transcribes both streams locally via [whisper.cpp](https://github.com/ggerganov/whisper.cpp), still tagged "you" vs. "them," and feeds the transcript to a Claude-backed cue agent that decides when it's actually worth interrupting and surfaces suggestions in a floating overlay window. The agent runs in one of a few **modes** (sales, meeting, general) that tune what it looks for and how eager it is to speak up.
 
 See [`CLAUDE.md`](./CLAUDE.md) for a deeper architectural tour (module boundaries, threading model, the helper wire protocol) and [`docs/audio-tap-protocol.md`](./docs/audio-tap-protocol.md) for the exact byte-level protocol between the Swift helper and the Rust core.
 
@@ -22,6 +23,9 @@ See [`CLAUDE.md`](./CLAUDE.md) for a deeper architectural tour (module boundarie
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
 - **Node.js** (v20+) and **pnpm** (`corepack enable` or `npm install -g pnpm`).
+- To use the assistant (transcription + cue agent), rather than just capture:
+  - A **Whisper model** on disk — run `bash scripts/download-model.sh` (defaults to `base.en`).
+  - An **Anthropic API key** — create one at [console.anthropic.com](https://console.anthropic.com) and `export ANTHROPIC_API_KEY=...` in the shell you launch the app from.
 
 ## Setup
 
@@ -42,6 +46,8 @@ pnpm tauri dev
 This starts the Vite dev server, builds the Rust workspace, builds the Swift helper on first run, and opens the app window. On first launch, macOS will prompt you separately for microphone access and for system-audio-capture access — you need to grant both for the two level meters to show activity. Click **Start capture** in the app to begin.
 
 Rust source changes trigger an automatic rebuild and relaunch. Frontend changes hot-reload without a restart.
+
+Starting the assistant (in addition to capture) transcribes both streams and shows suggestions in the overlay window; it needs the Whisper model and `ANTHROPIC_API_KEY` from the Requirements section above, and lets you pick a mode (sales / meeting / general) that tunes what the agent looks for and how often it speaks up.
 
 ## Testing
 
